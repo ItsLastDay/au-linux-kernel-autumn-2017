@@ -2,6 +2,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 
@@ -45,8 +46,43 @@ static int __init test_stack(void)
 
 static int __init print_processes_backwards(void)
 {
-    // TODO
-    return -ENODEV;
+    LIST_HEAD(task_name_stack);
+    int ret = 0;
+    struct task_struct* tsk;
+
+    for_each_process(tsk) {
+        char* task_name = 
+            (char*)kmalloc(FIELD_SIZEOF(struct task_struct, comm), GFP_KERNEL);
+        if (task_name == NULL) {
+            ret = -ENOMEM;
+            goto clear_stack_and_print_result;
+        }
+
+        get_task_comm(task_name, tsk);
+
+        stack_entry_t* cur_task_entry = 
+            create_stack_entry((void*)task_name);
+        if (cur_task_entry == NULL) {
+            ret = -ENOMEM;
+            kfree(task_name);
+            goto clear_stack_and_print_result;
+        }
+
+        stack_push(&task_name_stack, cur_task_entry);
+    }
+
+clear_stack_and_print_result:
+    while (!stack_empty(&task_name_stack)) {
+        stack_entry_t* top_task_name = stack_pop(&task_name_stack);
+        if (ret == 0) {
+            printk(KERN_INFO "%s\n", 
+                    STACK_ENTRY_DATA(top_task_name, const char*));
+        }
+        kfree(STACK_ENTRY_DATA(top_task_name, void*));
+        delete_stack_entry(top_task_name);
+    }
+
+    return ret;
 }
 
 static int __init ll_init(void)
