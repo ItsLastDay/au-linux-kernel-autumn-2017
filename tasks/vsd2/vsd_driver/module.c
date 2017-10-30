@@ -23,6 +23,20 @@ typedef struct vsd_dev {
 } vsd_dev_t;
 static vsd_dev_t *vsd_dev;
 
+static uint32_t num_mapped_vmas;
+
+static void vsd_vma_open(struct vm_area_struct *area) 
+{
+    pr_notice(LOG_TAG "vma opened\n");
+    ++num_mapped_vmas;
+}
+
+static void vsd_vma_close(struct vm_area_struct *area) 
+{
+    pr_notice(LOG_TAG "vma closed\n");
+    --num_mapped_vmas;
+}
+
 static int vsd_dev_open(struct inode *inode, struct file *filp)
 {
     pr_notice(LOG_TAG "opened\n");
@@ -108,7 +122,7 @@ static long vsd_ioctl_get_size(vsd_ioctl_get_size_arg_t __user *uarg)
 static long vsd_ioctl_set_size(vsd_ioctl_set_size_arg_t __user *uarg)
 {
     vsd_ioctl_set_size_arg_t arg;
-    if (0 /* TODO device is currently mapped */)
+    if (num_mapped_vmas)
         return -EBUSY;
 
     if (copy_from_user(&arg, uarg, sizeof(arg)))
@@ -135,7 +149,10 @@ static long vsd_dev_ioctl(struct file *filp, unsigned int cmd,
     }
 }
 
-static struct vm_operations_struct vsd_dev_vma_ops = {};
+static struct vm_operations_struct vsd_dev_vma_ops = {
+    .open = vsd_vma_open,
+    .close = vsd_vma_close
+};
 
 static int map_vmalloc_range(struct vm_area_struct *uvma, void *kaddr, size_t size)
 {
@@ -152,7 +169,16 @@ static int map_vmalloc_range(struct vm_area_struct *uvma, void *kaddr, size_t si
      * continuous. So we need to map each vmalloced page separetely.
      * Use vmalloc_to_page and vm_insert_page functions for this.
      */
-    // TODO
+    while (size) {
+        struct page *cur_page = vmalloc_to_page(kaddr);
+        if (vm_insert_page(uvma, uaddr, cur_page)) {
+            return -EINVAL;
+        }
+
+        uaddr += PAGE_SIZE;
+        size -= PAGE_SIZE;
+        kaddr += PAGE_SIZE;
+    }
 
     uvma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
     return 0;
@@ -176,6 +202,7 @@ static int vsd_dev_mmap(struct file *filp, struct vm_area_struct *vma)
         return ret;
 
     vma->vm_ops = &vsd_dev_vma_ops;
+    vsd_vma_open(vma);
 
     return 0;
 }
@@ -187,7 +214,8 @@ static struct file_operations vsd_dev_fops = {
     .read = vsd_dev_read,
     .write = vsd_dev_write,
     .llseek = vsd_dev_llseek,
-    .unlocked_ioctl = vsd_dev_ioctl
+    .unlocked_ioctl = vsd_dev_ioctl,
+    .mmap = vsd_dev_mmap
 };
 
 #undef LOG_TAG

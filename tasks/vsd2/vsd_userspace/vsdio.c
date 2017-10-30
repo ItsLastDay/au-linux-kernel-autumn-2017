@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include "vsd_device.h"
@@ -28,7 +29,7 @@ int main(int argc, char **argv) {
             int ret = vsd_set_size(size);
             if (ret) {
                 fprintf(stderr,
-                        "Couldn't set vsd size error code: %d\n", ret);
+                        "Couldn't set vsd size error code: %d %s\n", ret, strerror(errno));
             }
         } else {
             fprintf(stderr, "Supply new size\n");
