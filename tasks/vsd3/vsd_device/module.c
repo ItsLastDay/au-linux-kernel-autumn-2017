@@ -54,26 +54,32 @@ static vsd_plat_device_t dev = {
     }
 };
 
+static void flush_registers_and_set_result(ssize_t res) {
+    dev.hwregs->cmd = VSD_CMD_NONE;
+    dev.hwregs->result = res;
+    wmb();
+}
+
 static ssize_t vsd_dev_read(char *dst, size_t dst_size, size_t offset) {
-    (void)dst;
-    (void)dst_size;
-    (void)offset;
-    // TODO
-    return -EINVAL;
+    memcpy(dst, dev.vbuf + offset, dst_size); 
+    flush_registers_and_set_result(dst_size);
+    return dst_size;
 }
 
 static ssize_t vsd_dev_write(char *src, size_t src_size, size_t offset) {
-    (void)src;
-    (void)src_size;
-    (void)offset;
-    // TODO
-    return -EINVAL;
+    memcpy(dev.vbuf + offset, src, src_size);
+    flush_registers_and_set_result(src_size);
+    return src_size;
 }
 
 static void vsd_dev_set_size(size_t size)
 {
-    (void)size;
-    // TODO
+    ssize_t ret = -ENOMEM;
+    if (size <= buf_size) {
+        dev.hwregs->dev_size = size;
+        ret = 0;
+    }
+    flush_registers_and_set_result(ret);
 }
 
 static int vsd_dev_cmd_poll_kthread_func(void *data)
@@ -101,8 +107,9 @@ static int vsd_dev_cmd_poll_kthread_func(void *data)
                 break;
         }
 
-        // TODO notify vsd_driver about finished cmd
-        // Sleep one sec not to waste CPU on polling
+        if (dev.hwregs->tasklet_vaddr != NULL) {
+            tasklet_schedule((void*)dev.hwregs->tasklet_vaddr);
+        }
         ssleep(1);
     }
     pr_notice(LOG_TAG "cmd poll thread exited");
@@ -119,6 +126,9 @@ static int __init vsd_dev_module_init(void)
         pr_warn(LOG_TAG "Can't allocate memory\n");
         goto error_alloc_hw;
     }
+    vsd_plat_device_resources[VSD_RES_REGS_IX].start = dev.hwregs;
+    vsd_plat_device_resources[VSD_RES_REGS_IX].end = 
+        (char*)dev.hwregs + sizeof(vsd_hw_regs_t) - 1;
 
     dev.vbuf = (char*)vzalloc(buf_size);
     if (!dev.vbuf) {

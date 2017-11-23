@@ -14,6 +14,7 @@
 #include <linux/wait.h>
 #include <linux/sched.h>
 #include <linux/uaccess.h>
+#include <linux/spinlock.h>
 
 #include "../vsd_device/vsd_hw.h"
 #include "vsd_ioctl.h"
@@ -26,6 +27,11 @@ typedef struct vsd_dev {
     volatile vsd_hw_regs_t *hwregs;
 } vsd_dev_t;
 static vsd_dev_t *vsd_dev;
+
+static DEFINE_SPINLOCK(vsd_device_lock);
+static DECLARE_WAIT_QUEUE_HEAD(data_wait_queue);
+static bool wait_queue_flag;
+
 
 #define LOCAL_DEBUG 0
 static void print_vsd_dev_hw_regs(vsd_dev_t *vsd_dev)
@@ -51,6 +57,17 @@ static void print_vsd_dev_hw_regs(vsd_dev_t *vsd_dev)
     );
 }
 
+static void lock_device(void) 
+{
+    spin_lock_irq(&vsd_device_lock);
+    wait_queue_flag = false;
+}
+
+static void unlock_device(void) 
+{
+    spin_unlock_irq(&vsd_device_lock);
+}
+
 static int vsd_dev_open(struct inode *inode, struct file *filp)
 {
     pr_notice(LOG_TAG "vsd dev opened\n");
@@ -66,29 +83,90 @@ static int vsd_dev_release(struct inode *inode, struct file *filp)
 static void vsd_dev_dma_op_complete_tsk_func(unsigned long unused)
 {
     (void)unused;
-    // TODO wake up thread waiting for VSD cmd completion
+    wait_queue_flag = true;
+    wmb();
+    wake_up(&data_wait_queue);
 }
 
 static ssize_t vsd_dev_read(struct file *filp,
     char __user *read_user_buf, size_t read_size, loff_t *fpos)
 {
+    if (*fpos >= vsd_dev->hwregs->dev_size)
+        return 0;
+
+    if (*fpos + read_size >= vsd_dev->hwregs->dev_size)
+        read_size = vsd_dev->hwregs->dev_size - *fpos;
+
+    ssize_t ret = -EINVAL;
+
     (void)filp;
-    (void)read_user_buf;
-    (void)read_size;
-    (void)fpos;
-    // TODO
-    return -EINVAL;
+    lock_device();
+
+
+    char* buf = kmalloc(read_size, GFP_KERNEL);
+    if (buf == NULL) {
+        goto clean;
+    }
+
+    vsd_dev->hwregs->cmd = VSD_CMD_READ;
+    vsd_dev->hwregs->dma_paddr = virt_to_phys(buf);
+    vsd_dev->hwregs->dma_size = read_size;
+    vsd_dev->hwregs->dev_offset = *fpos;
+    wmb();
+
+    if (wait_event_killable(data_wait_queue, wait_queue_flag)) {
+        goto clean;
+    }
+
+    if (!copy_to_user(read_user_buf, buf, read_size)) {
+        ret = vsd_dev->hwregs->result;
+        *fpos += ret;
+    } else {
+        ret = -EFAULT;
+    }
+
+clean:
+    unlock_device();
+    return ret;
 }
 
 static ssize_t vsd_dev_write(struct file *filp,
     const char __user *write_user_buf, size_t write_size, loff_t *fpos)
 {
+    if (*fpos >= vsd_dev->hwregs->dev_size)
+        return -EINVAL;
+
+    if (*fpos + write_size >= vsd_dev->hwregs->dev_size)
+        write_size = vsd_dev->hwregs->dev_size - *fpos;
+
+    ssize_t ret = -EINVAL;
+
     (void)filp;
-    (void)write_user_buf;
-    (void)write_size;
-    (void)fpos;
-    // TODO
-    return -EINVAL;
+    lock_device();
+
+    char* buf = kmalloc(write_size, GFP_KERNEL);
+    if (buf == NULL || 
+            copy_from_user(buf, write_user_buf, write_size)) {
+        ret = -EFAULT;
+        goto clean;
+    }
+
+    vsd_dev->hwregs->cmd = VSD_CMD_WRITE;
+    vsd_dev->hwregs->dma_paddr = virt_to_phys(buf);
+    vsd_dev->hwregs->dma_size = write_size;
+    vsd_dev->hwregs->dev_offset = *fpos;
+    wmb();
+
+    if (wait_event_killable(data_wait_queue, wait_queue_flag)) {
+        goto clean;
+    }
+
+    ret = vsd_dev->hwregs->result;
+    *fpos += ret;
+
+clean:
+    unlock_device();
+    return ret;
 }
 
 static loff_t vsd_dev_llseek(struct file *filp, loff_t off, int whence)
@@ -131,9 +209,30 @@ static long vsd_ioctl_get_size(vsd_ioctl_get_size_arg_t __user *uarg)
 
 static long vsd_ioctl_set_size(vsd_ioctl_set_size_arg_t __user *uarg)
 {
-    // TODO
-    (void)uarg;
-    return -EINVAL;
+    ssize_t ret = -EFAULT;
+
+    lock_device();
+
+    vsd_ioctl_set_size_arg_t arg;
+
+    if (copy_from_user(&arg, uarg, sizeof(arg))) {
+        goto clean;
+    }
+
+    vsd_dev->hwregs->cmd = VSD_CMD_SET_SIZE;
+    vsd_dev->hwregs->dev_offset = arg.size;
+    wmb();
+
+    if (wait_event_killable(data_wait_queue, wait_queue_flag)) {
+        pr_notice(LOG_TAG "fail set size");
+        goto clean;
+    }
+
+    ret = vsd_dev->hwregs->result;
+
+clean:
+    unlock_device();
+    return ret;
 }
 
 static long vsd_dev_ioctl(struct file *filp, unsigned int cmd,
@@ -196,6 +295,7 @@ static int vsd_driver_probe(struct platform_device *pdev)
     }
     vsd_dev->hwregs = (volatile vsd_hw_regs_t*)
         phys_to_virt(vsd_control_regs_res->start);
+    vsd_dev->hwregs->tasklet_vaddr = &vsd_dev->dma_op_complete_tsk;
 
     print_vsd_dev_hw_regs(vsd_dev);
     pr_notice(LOG_TAG "VSD dev with MINOR %u"
@@ -216,6 +316,7 @@ static int vsd_driver_remove(struct platform_device *dev)
     // module can't be unloaded if its users has even single
     // opened fd
     pr_notice(LOG_TAG "removing device %s\n", dev->name);
+    vsd_dev->hwregs->tasklet_vaddr = NULL;
     misc_deregister(&vsd_dev->mdev);
     kfree(vsd_dev);
     vsd_dev = NULL;
