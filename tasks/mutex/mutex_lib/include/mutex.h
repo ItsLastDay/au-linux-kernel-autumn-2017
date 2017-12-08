@@ -3,9 +3,14 @@
 #include <sys/types.h>
 #include <shared_spinlock.h>
 #include <mutex_ioctl.h>
+#include <stdint.h>
 
 typedef struct mutex {
-    // TODO store userspace side mutex state here
+    shared_spinlock_t spinlock;
+    uint32_t num_waiters;
+    mutex_id_t internal_id;
+
+    int dev_fd;
 } mutex_t;
 
 // Return codes

@@ -1,45 +1,77 @@
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <mutex.h>
+
+static int dev_fd;
 
 mutex_err_t mutex_init(mutex_t *m)
 {
-    // TODO initialize userspace side mutex state
-    // and create kernel space mutex state
-    return MUTEX_INTERNAL_ERR;
+    shared_spinlock_init(&m->spinlock);
+    m->num_waiters = 0;
+
+    mutex_ioctl_lock_create_arg_t arg;
+    arg.mutex_splock_vaddr = &m->spinlock;
+    mutex_err_t ret = ioctl(dev_fd, MUTEX_IOCTL_LOCK_CREATE, &arg) 
+        ? MUTEX_INTERNAL_ERR : MUTEX_OK;
+
+    m->internal_id = arg.id;
+
+    return ret;
 }
 
 mutex_err_t mutex_deinit(mutex_t *m)
 {
-    // TODO destroy kernel side mutex state
-    // and deinitialize userspace side.
-    return MUTEX_INTERNAL_ERR;
+    mutex_ioctl_lock_delete_arg_t arg;
+    arg.id = m->internal_id;
+    return ioctl(dev_fd, MUTEX_IOCTL_LOCK_DELETE, &arg) 
+        ? MUTEX_INTERNAL_ERR : MUTEX_OK;
 }
 
 mutex_err_t mutex_lock(mutex_t *m)
 {
-    // TODO lock spinlock here.
-    // If not successful then go to sleep
-    // in kernel.
-    return MUTEX_INTERNAL_ERR;
+    if (!shared_spin_trylock(&m->spinlock)) {
+        mutex_ioctl_thread_putwait_arg_t arg;
+        arg.id = m->internal_id;
+        long has_added_waiter = ioctl(dev_fd, MUTEX_IOCTL_THREAD_PUTWAIT, &arg);
+        if (has_added_waiter < 0) {
+            return MUTEX_INTERNAL_ERR;
+        } 
+        m->num_waiters += has_added_waiter;
+    }
+
+    return MUTEX_OK;
 }
 
 mutex_err_t mutex_unlock(mutex_t *m)
 {
-    // TODO unlock spinlock
-    // and wakeup one kernel side waiter
-    // if it exists.
-    return MUTEX_INTERNAL_ERR;
+    shared_spin_unlock(&m->spinlock); 
+    if (m->num_waiters) {
+        mutex_ioctl_thread_wakeup_arg_t arg;
+        arg.id = m->internal_id;
+        long has_wokenup_waiter = ioctl(dev_fd, MUTEX_IOCTL_THREAD_WAKEUP, &arg);
+        if (has_wokenup_waiter < 0) {
+            return MUTEX_INTERNAL_ERR;
+        }
+
+        m->num_waiters -= has_wokenup_waiter; 
+    }
+
+    return MUTEX_OK;
 }
 
 mutex_err_t mutex_lib_init()
 {
-    // TODO create current process mutex
-    // registry on kernel side
-    return MUTEX_INTERNAL_ERR;
+    long ret = open("/dev/mutex", O_WRONLY);
+    if (ret < 0) {
+        return MUTEX_INTERNAL_ERR;
+    }
+
+    dev_fd = ret;
+    return MUTEX_OK;
 }
 
 mutex_err_t mutex_lib_deinit()
 {
-    // TODO destroy current process mutex
-    // registry on kernel side
-    return MUTEX_INTERNAL_ERR;
+    return close(dev_fd) ? MUTEX_INTERNAL_ERR : MUTEX_OK;
 }
