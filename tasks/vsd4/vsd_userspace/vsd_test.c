@@ -37,7 +37,15 @@ static void test_blocking_rw(void)
 
     // Check rw
     TEST(!vsd_set_blocking());
+#ifdef LOCAL_DEBUG
+    printf("write started\n");
+    fflush(stdout);
+#endif
     TEST(vsd_write(vsd_w_buf, vsd_size, 0) == vsd_size);
+#ifdef LOCAL_DEBUG
+    printf("write completed\n");
+    fflush(stdout);
+#endif
     TEST(vsd_read(vsd_r_buf, vsd_size, 0) == vsd_size);
 #if LOCAL_DEBUG
     for (i = 0; i < vsd_size; ++i)
@@ -113,6 +121,8 @@ static void test_nonblocking_w(void)
 
     // Check that non blocking writes has completed ok
     TEST(!vsd_set_blocking());
+    printf("Want blocking read\n");
+    fflush(stdout);
     TEST(vsd_read(vsd_r_buf, vsd_size, 0) == vsd_size);
     TEST(!memcmp(vsd_w_buf, vsd_r_buf,
                 async_chunk_size * VSD_DEV_QUEUE_SIZE));

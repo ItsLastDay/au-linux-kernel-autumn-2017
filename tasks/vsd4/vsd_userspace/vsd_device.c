@@ -25,14 +25,12 @@ int vsd_deinit()
 
 int vsd_set_blocking(void)
 {
-    // TODO
-    return -1;
+    return fcntl(vsd_fd, F_SETFL, O_RDWR);
 }
 
 int vsd_set_nonblocking(void)
 {
-    // TODO
-    return -1;
+    return fcntl(vsd_fd, F_SETFL, O_RDWR | O_NONBLOCK);
 }
 
 int vsd_get_size(size_t *out_size)
@@ -69,6 +67,10 @@ ssize_t vsd_write(const char* src, size_t size, off_t offset)
 
 int vsd_wait_nonblock_write(void)
 {
-    // TODO
-    return -1;
+    struct pollfd fd = {
+        vsd_fd,
+        POLLOUT | POLLWRNORM,
+        0
+    };
+    return poll(&fd, 1, -1) != 1;
 }
